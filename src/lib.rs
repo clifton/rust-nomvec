@@ -8,19 +8,18 @@ use std::alloc::{alloc, realloc, Layout, dealloc, rust_oom};
 
 use std::ptr::{self, Unique};
 
-#[derive(Debug)]
-pub struct CVec<T> {
+struct RawVec<T> {
     ptr: Unique<T>,
     cap: usize,
-    len: usize,
 }
 
-impl<T> CVec<T> {
-    pub fn new() -> Self {
-        assert!(mem::size_of::<T>() != 0, "not ready to handle zero sized types!");
-        Self { ptr: Unique::empty(), len: 0, cap: 0, }
+impl<T> RawVec<T> {
+    fn new() -> Self {
+        assert!(mem::size_of::<T>() != 0, "TODO: implement ZST support");
+        RawVec { ptr: Unique::empty(), cap: 0, }
     }
 
+    // unchanged from Vec
     fn grow(&mut self) {
         unsafe {
             let align = mem::align_of::<T>();
@@ -43,19 +42,56 @@ impl<T> CVec<T> {
                 (new_cap, ptr)
             };
 
+            // If allocate or reallocate fail, we'll get `null` back
             if ptr.is_null() {
-                rust_oom(Layout::from_size_align_unchecked(new_cap * elem_size, align));
+                rust_oom(Layout::from_size_align_unchecked(
+                    new_cap * elem_size,
+                    align,
+                ));
             }
 
             self.ptr = Unique::new(ptr as *mut _).unwrap();
             self.cap = new_cap;
         }
     }
+}
+
+impl<T> Drop for RawVec<T> {
+    fn drop(&mut self) {
+        if self.cap != 0 {
+            let align = mem::align_of::<T>();
+            let elem_size = mem::size_of::<T>();
+            let num_bytes = elem_size * self.cap;
+            unsafe {
+                let layout = Layout::from_size_align_unchecked(num_bytes, align);
+                dealloc(self.ptr.as_ptr() as *mut _, layout);
+            }
+        }
+    }
+}
+
+pub struct CVec<T> {
+    buf: RawVec<T>,
+    len: usize,
+}
+
+impl<T> CVec<T> {
+    fn ptr(&self) -> *mut T {
+        self.buf.ptr.as_ptr()
+    }
+
+    fn cap(&self) -> usize {
+        self.buf.cap
+    }
+
+    pub fn new() -> Self {
+        Self { buf: RawVec::new(), len: 0, }
+    }
 
     pub fn push(&mut self, elem: T) {
-        if self.len == self.cap { self.grow(); }
+        if self.len == self.cap() { self.buf.grow(); }
         unsafe {
-            ptr::write(self.ptr.as_ptr().offset(self.len as isize), elem);
+            ptr::write(self.ptr().offset(self.len as isize), elem);
         }
         self.len += 1;
     }
@@ -66,7 +102,7 @@ impl<T> CVec<T> {
         } else {
             self.len -= 1;
             unsafe {
-                Some(ptr::read(self.ptr.as_ptr().offset(self.len as isize)))
+                Some(ptr::read(self.ptr().offset(self.len as isize)))
             }
         }
     }
@@ -79,15 +115,15 @@ impl<T> CVec<T> {
         // Note: `<=` because it's valid to insert after everything
         // which would be equivalent to push.
         assert!(index <= self.len, "index out of bounds");
-        if self.cap == self.len { self.grow(); }
+        if self.cap() == self.len { self.buf.grow(); }
         unsafe {
             if index < self.len {
-                ptr::copy(self.ptr.as_ptr().offset(index as isize),
-                          self.ptr.as_ptr().offset(index as isize + 1),
+                ptr::copy(self.ptr().offset(index as isize),
+                          self.ptr().offset(index as isize + 1),
                           self.len - index
                 );
             }
-            ptr::write(self.ptr.as_ptr().offset(index as isize), elem);
+            ptr::write(self.ptr().offset(index as isize), elem);
             self.len += 1;
         }
     }
@@ -96,9 +132,9 @@ impl<T> CVec<T> {
         assert!(index < self.len, "index out of bounds");
         unsafe {
             self.len -= 1;
-            let result = ptr::read(self.ptr.as_ptr().offset(index as isize));
-            ptr::copy(self.ptr.as_ptr().offset(index as isize + 1),
-                      self.ptr.as_ptr().offset(index as isize),
+            let result = ptr::read(self.ptr().offset(index as isize));
+            ptr::copy(self.ptr().offset(index as isize + 1),
+                      self.ptr().offset(index as isize),
                       self.len - index);
             result
         }
@@ -107,16 +143,8 @@ impl<T> CVec<T> {
 
 impl<T> Drop for CVec<T> {
     fn drop(&mut self) {
-        if self.cap != 0 {
-            while let Some(_) = self.pop() {}
-            let align = mem::align_of::<T>();
-            let elem_size = mem::size_of::<T>();
-            let num_bytes = elem_size * self.cap;
-            unsafe {
-                let layout = Layout::from_size_align_unchecked(num_bytes, align);
-                dealloc(self.ptr.as_ptr() as *mut _, layout);
-            }
-        }
+        // deallocation is handled by RawVec
+        while let Some(_) = self.pop() {}
     }
 }
 
@@ -124,7 +152,7 @@ impl<T> Deref for CVec<T> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         unsafe {
-            ::std::slice::from_raw_parts(self.ptr.as_ptr(), self.len)
+            ::std::slice::from_raw_parts(self.ptr(), self.len)
         }
     }
 }
@@ -132,14 +160,13 @@ impl<T> Deref for CVec<T> {
 impl<T> DerefMut for CVec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
         unsafe {
-            ::std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len)
+            ::std::slice::from_raw_parts_mut(self.ptr(), self.len)
         }
     }
 }
 
 struct IntoIter<T> {
-    buf: Unique<T>,
-    cap: usize,
+    _buf: RawVec<T>,
     start: *const T,
     end: *const T,
 }
@@ -180,17 +207,9 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 
 impl<T> Drop for IntoIter<T> {
     fn drop(&mut self) {
-        if self.cap != 0 {
-            // take ownership of remaining elements
-            for _ in &mut *self {}
-            let align = mem::align_of::<T>();
-            let elem_size = mem::size_of::<T>();
-            let num_bytes = elem_size * self.cap;
-            unsafe {
-                let layout = Layout::from_size_align_unchecked(num_bytes, align);
-                dealloc(self.buf.as_ptr() as *mut _, layout);
-            }
-        }
+        // only need to ensure all our elements are read;
+        // buffer will clean itself up afterwards.
+        for _ in &mut *self {}
     }
 }
 
@@ -247,7 +266,7 @@ mod tests {
 
     #[test]
     fn vec_insert() {
-        let mut cv = CVec::new();
+        let mut cv: CVec<i32> = CVec::new();
         cv.insert(0, 2); // test insert at end
         cv.insert(0, 1); // test insert at beginning
         assert_eq!(cv.pop().unwrap(), 2);
@@ -255,7 +274,7 @@ mod tests {
 
     #[test]
     fn vec_remove() {
-        let mut cv: CVec<i32> = CVec::new();
+        let mut cv = CVec::new();
         cv.push(2);
         assert_eq!(cv.remove(0), 2);
         assert_eq!(cv.len(), 0);
