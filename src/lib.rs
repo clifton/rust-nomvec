@@ -139,6 +139,22 @@ impl<T> CVec<T> {
             result
         }
     }
+
+    #[allow(dead_code)]
+    fn into_iter(self) -> IntoIter<T> {
+        unsafe {
+            // need to use ptr::read to unsafely move the buf out since it's
+            // not Copy, and Vec implements Drop (so we can't destructure it).
+            let buf = ptr::read(&self.buf);
+            let len = self.len;
+            mem::forget(self);
+            IntoIter {
+                start: buf.ptr.as_ptr(),
+                end: buf.ptr.as_ptr().offset(len as isize),
+                _buf: buf,
+            }
+        }
+    }
 }
 
 impl<T> Drop for CVec<T> {
@@ -243,7 +259,7 @@ mod tests {
         let mut cv = CVec::new();
         cv.push(2);
         cv.push(3);
-        assert_eq!(format!("{:?}", cv.into_iter()), "Iter([2, 3])");
+        assert_eq!(cv.into_iter().collect::<Vec<i32>>(), vec![2, 3]);
     }
 
     #[test]
