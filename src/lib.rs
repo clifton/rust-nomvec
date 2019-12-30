@@ -15,15 +15,21 @@ struct RawVec<T> {
 
 impl<T> RawVec<T> {
     fn new() -> Self {
-        assert!(mem::size_of::<T>() != 0, "TODO: implement ZST support");
-        RawVec { ptr: Unique::empty(), cap: 0, }
+        let cap = if mem::size_of::<T>() == 0 { ::std::usize::MAX } else { 0 };
+        // Unique::empty() doubles as "unallocated" and "zero-sized allocation"
+        RawVec { ptr: Unique::empty(), cap, }
     }
 
     // unchanged from Vec
     fn grow(&mut self) {
         unsafe {
-            let align = mem::align_of::<T>();
             let elem_size = mem::size_of::<T>();
+
+            // since we set the capacity to usize::MAX when elem_size is
+            // 0, getting to here necessarily means the Vec is overfull.
+            assert!(elem_size != 0, "capacity overflow");
+
+            let align = mem::align_of::<T>();
 
             let (new_cap, ptr) = if self.cap == 0 {
                 let layout = Layout::from_size_align_unchecked(elem_size, align);
@@ -59,12 +65,16 @@ impl<T> RawVec<T> {
 impl<T> Drop for RawVec<T> {
     fn drop(&mut self) {
         if self.cap != 0 {
-            let align = mem::align_of::<T>();
             let elem_size = mem::size_of::<T>();
-            let num_bytes = elem_size * self.cap;
-            unsafe {
-                let layout = Layout::from_size_align_unchecked(num_bytes, align);
-                dealloc(self.ptr.as_ptr() as *mut _, layout);
+
+            // don't free zero-sized allocations, as they were never allocated.
+            if self.cap != 0 && elem_size != 0 {
+                let align = mem::align_of::<T>();
+                let num_bytes = elem_size * self.cap;
+                unsafe {
+                    let layout = Layout::from_size_align_unchecked(num_bytes, align);
+                    dealloc(self.ptr.as_ptr() as *mut _, layout);
+                }
             }
         }
     }
@@ -245,7 +255,11 @@ impl<T> Iterator for RawValIter<T> {
         } else {
             unsafe {
                 let result = ptr::read(self.start);
-                self.start = self.start.offset(1);
+                self.start = if mem::size_of::<T>() == 0 {
+                    (self.start as usize + 1) as *const _
+                } else {
+                    self.start.offset(1)
+                };
                 Some(result)
             }
         }
@@ -381,5 +395,18 @@ mod tests {
             assert_eq!(drain.next_back().unwrap(), 3);
         }
         assert_eq!(cv.len(), 0);
+    }
+
+    #[test]
+    fn vec_zst() {
+        #[derive(PartialEq, Debug)]
+        struct ZST();
+        let mut cv = CVec::new();
+        cv.push(ZST {});
+        cv.push(ZST {});
+        assert_eq!(cv.len(), 2);
+        assert_eq!(cv.pop().unwrap(), ZST {});
+        assert_eq!(cv.pop().unwrap(), ZST {});
+        assert_eq!(cv.pop(), None);
     }
 }
