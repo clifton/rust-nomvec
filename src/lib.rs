@@ -1,11 +1,10 @@
 #![feature(ptr_internals)] // std::ptr::Unique
-#![feature(alloc_internals)] // std::alloc::rust_oom
+#![feature(alloc_internals)] // std::alloc::*
 
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::alloc::{alloc, realloc, Layout, dealloc, rust_oom};
 use std::marker::PhantomData;
-
 use std::ptr::{self, Unique};
 
 struct RawVec<T> {
@@ -80,12 +79,14 @@ impl<T> Drop for RawVec<T> {
     }
 }
 
-pub struct CVec<T> {
+
+
+pub struct NomVec<T> {
     buf: RawVec<T>,
     len: usize,
 }
 
-impl<T> CVec<T> {
+impl<T> NomVec<T> {
     fn ptr(&self) -> *mut T {
         self.buf.ptr.as_ptr()
     }
@@ -174,14 +175,14 @@ impl<T> CVec<T> {
     }
 }
 
-impl<T> Drop for CVec<T> {
+impl<T> Drop for NomVec<T> {
     fn drop(&mut self) {
         // deallocation is handled by RawVec
         while let Some(_) = self.pop() {}
     }
 }
 
-impl<T> Deref for CVec<T> {
+impl<T> Deref for NomVec<T> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         unsafe {
@@ -190,13 +191,15 @@ impl<T> Deref for CVec<T> {
     }
 }
 
-impl<T> DerefMut for CVec<T> {
+impl<T> DerefMut for NomVec<T> {
     fn deref_mut(&mut self) -> &mut [T] {
         unsafe {
             ::std::slice::from_raw_parts_mut(self.ptr(), self.len)
         }
     }
 }
+
+
 
 struct IntoIter<T> {
     _buf: RawVec<T>,
@@ -221,6 +224,8 @@ impl<T> Drop for IntoIter<T> {
         for _ in &mut self.iter {}
     }
 }
+
+
 
 struct RawValIter<T> {
     start: *const T,
@@ -284,11 +289,13 @@ impl<T> DoubleEndedIterator for RawValIter<T> {
     }
 }
 
+
+
 pub struct Drain<'a, T: 'a> {
     // Need to bound the lifetime here, so we do it with `&'a mut Vec<T>`
     // because that's semantically what we contain. We're "just" calling
     // `pop()` and `remove(0)`.
-    vec: PhantomData<&'a mut CVec<T>>,
+    vec: PhantomData<&'a mut NomVec<T>>,
     iter: RawValIter<T>,
 }
 
@@ -308,13 +315,15 @@ impl<'a, T> Drop for Drain<'a, T> {
     }
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn vec_push() {
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(2);
         assert_eq!(cv.len(), 1);
         cv.push(3);
@@ -323,7 +332,7 @@ mod tests {
 
     #[test]
     fn vec_iter() {
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(2);
         cv.push(3);
         let mut accum = 0;
@@ -335,7 +344,7 @@ mod tests {
 
     #[test]
     fn vec_into_iter() {
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(2);
         cv.push(3);
         assert_eq!(cv.into_iter().collect::<Vec<i32>>(), vec![2, 3]);
@@ -343,7 +352,7 @@ mod tests {
 
     #[test]
     fn vec_into_double_ended_iter() {
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(2);
         cv.push(3);
         assert_eq!(*cv.iter().next_back().unwrap(), 3);
@@ -351,7 +360,7 @@ mod tests {
 
     #[test]
     fn vec_pop() {
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(2);
         assert_eq!(cv.len(), 1);
         cv.pop();
@@ -361,7 +370,7 @@ mod tests {
 
     #[test]
     fn vec_insert() {
-        let mut cv: CVec<i32> = CVec::new();
+        let mut cv: NomVec<i32> = NomVec::new();
         cv.insert(0, 2); // test insert at end
         cv.insert(0, 1); // test insert at beginning
         assert_eq!(cv.pop().unwrap(), 2);
@@ -369,7 +378,7 @@ mod tests {
 
     #[test]
     fn vec_remove() {
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(2);
         assert_eq!(cv.remove(0), 2);
         assert_eq!(cv.len(), 0);
@@ -378,13 +387,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "index out of bounds")]
     fn vec_cant_remove() {
-        let mut cv: CVec<i32> = CVec::new();
+        let mut cv: NomVec<i32> = NomVec::new();
         cv.remove(0);
     }
 
     #[test]
     fn vec_drain() {
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(1);
         cv.push(2);
         cv.push(3);
@@ -397,11 +406,12 @@ mod tests {
         assert_eq!(cv.len(), 0);
     }
 
+    #[derive(PartialEq, Debug)]
+    struct ZST;
+
     #[test]
     fn vec_zst() {
-        #[derive(PartialEq, Debug)]
-        struct ZST();
-        let mut cv = CVec::new();
+        let mut cv = NomVec::new();
         cv.push(ZST {});
         cv.push(ZST {});
         assert_eq!(cv.len(), 2);
