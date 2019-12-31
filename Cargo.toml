@@ -3,5 +3,7 @@ name = "nomvec"
 version = "0.1.0"
 authors = ["Clifton King <cliftonk@gmail.com>"]
 edition = "2018"
+description = "Vector implementation from"
+license = "MIT"
 
 [dependencies]
