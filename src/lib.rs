@@ -21,18 +21,15 @@ impl<T> RawVec<T> {
 
     // unchanged from Vec
     fn grow(&mut self) {
+        let elem_size = mem::size_of::<T>();
+        let align = mem::align_of::<T>();
+        // since we set the capacity to usize::MAX when elem_size is
+        // 0, getting to here necessarily means the Vec is overfull.
+        assert!(elem_size != 0, "capacity overflow");
         unsafe {
-            let elem_size = mem::size_of::<T>();
-
-            // since we set the capacity to usize::MAX when elem_size is
-            // 0, getting to here necessarily means the Vec is overfull.
-            assert!(elem_size != 0, "capacity overflow");
-
-            let align = mem::align_of::<T>();
-
             let (new_cap, ptr) = if self.cap == 0 {
-                let layout = Layout::from_size_align_unchecked(elem_size, align);
-                let ptr = alloc(layout);
+                let new_layout = Layout::from_size_align(elem_size, align).unwrap();
+                let ptr = alloc(new_layout);
                 (1, ptr)
             } else {
                 let new_cap = self.cap * 2;
@@ -42,19 +39,17 @@ impl<T> RawVec<T> {
                     "Capacity overflow!"
                 );
                 let num_new_bytes = old_num_bytes * 2;
-                let layout = Layout::from_size_align_unchecked(old_num_bytes, align);
-                let ptr = realloc(self.ptr.as_ptr() as *mut _, layout, num_new_bytes);
+                let old_layout = Layout::from_size_align(old_num_bytes, align).unwrap();
+                let ptr = realloc(self.ptr.as_ptr() as *mut _, old_layout, num_new_bytes);
                 (new_cap, ptr)
             };
 
             // If allocate or reallocate fail, we'll get `null` back
             if ptr.is_null() {
-                rust_oom(Layout::from_size_align_unchecked(
-                    new_cap * elem_size,
-                    align,
-                ));
+                let new_layout = Layout::from_size_align(
+                    new_cap * elem_size, align).unwrap();
+                rust_oom(new_layout);
             }
-
             self.ptr = Unique::new(ptr as *mut _).unwrap();
             self.cap = new_cap;
         }
@@ -70,8 +65,8 @@ impl<T> Drop for RawVec<T> {
             if self.cap != 0 && elem_size != 0 {
                 let align = mem::align_of::<T>();
                 let num_bytes = elem_size * self.cap;
+                let layout = Layout::from_size_align(num_bytes, align).unwrap();
                 unsafe {
-                    let layout = Layout::from_size_align_unchecked(num_bytes, align);
                     dealloc(self.ptr.as_ptr() as *mut _, layout);
                 }
             }
