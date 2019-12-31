@@ -1,5 +1,5 @@
 [package]
-name = "myvec"
+name = "nomvec"
 version = "0.1.0"
 authors = ["Clifton King <cliftonk@gmail.com>"]
 edition = "2018"

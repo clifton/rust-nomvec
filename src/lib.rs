@@ -1,11 +1,11 @@
 #![feature(ptr_internals)] // std::ptr::Unique
 #![feature(alloc_internals)] // std::alloc::*
 
+use std::ptr::{self, Unique};
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::alloc::{alloc, realloc, Layout, dealloc, rust_oom};
 use std::marker::PhantomData;
-use std::ptr::{self, Unique};
 
 struct RawVec<T> {
     ptr: Unique<T>,
@@ -87,13 +87,9 @@ pub struct NomVec<T> {
 }
 
 impl<T> NomVec<T> {
-    fn ptr(&self) -> *mut T {
-        self.buf.ptr.as_ptr()
-    }
+    fn ptr(&self) -> *mut T { self.buf.ptr.as_ptr() }
 
-    fn cap(&self) -> usize {
-        self.buf.cap
-    }
+    fn cap(&self) -> usize { self.buf.cap }
 
     pub fn new() -> Self {
         Self { buf: RawVec::new(), len: 0, }
@@ -104,6 +100,7 @@ impl<T> NomVec<T> {
         unsafe {
             ptr::write(self.ptr().offset(self.len as isize), elem);
         }
+        // Can't fail, we'll OOM first.
         self.len += 1;
     }
 
@@ -131,8 +128,7 @@ impl<T> NomVec<T> {
             if index < self.len {
                 ptr::copy(self.ptr().offset(index as isize),
                           self.ptr().offset(index as isize + 1),
-                          self.len - index
-                );
+                          self.len - index);
             }
             ptr::write(self.ptr().offset(index as isize), elem);
             self.len += 1;
@@ -204,31 +200,6 @@ impl<T> IntoIterator for NomVec<T> {
 }
 
 
-pub struct IntoIter<T> {
-    _buf: RawVec<T>,
-    iter: RawValIter<T>,
-}
-
-impl<T> Iterator for IntoIter<T> {
-    type Item = T;
-    fn next(&mut self) -> Option<T> { self.iter.next() }
-
-    fn size_hint(&self) -> (usize, Option<usize>) { self.iter.size_hint() }
-}
-
-impl<T> DoubleEndedIterator for IntoIter<T> {
-    fn next_back(&mut self) -> Option<T> { self.iter.next_back() }
-}
-
-impl<T> Drop for IntoIter<T> {
-    fn drop(&mut self) {
-        // only need to ensure all our elements are read;
-        // buffer will clean itself up afterwards.
-        for _ in &mut self.iter {}
-    }
-}
-
-
 
 struct RawValIter<T> {
     start: *const T,
@@ -296,6 +267,38 @@ impl<T> DoubleEndedIterator for RawValIter<T> {
 
 
 
+pub struct IntoIter<T> {
+    _buf: RawVec<T>,
+    iter: RawValIter<T>,
+}
+
+impl<T> Iterator for IntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        self.iter.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.iter.size_hint()
+    }
+}
+
+impl<T> DoubleEndedIterator for IntoIter<T> {
+    fn next_back(&mut self) -> Option<T> {
+        self.iter.next_back()
+    }
+}
+
+impl<T> Drop for IntoIter<T> {
+    fn drop(&mut self) {
+        // only need to ensure all our elements are read;
+        // buffer will clean itself up afterwards.
+        for _ in &mut self.iter {}
+    }
+}
+
+
+
 pub struct Drain<'a, T: 'a> {
     // Need to bound the lifetime here, so we do it with `&'a mut Vec<T>`
     // because that's semantically what we contain. We're "just" calling
@@ -316,6 +319,7 @@ impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
 
 impl<'a, T> Drop for Drain<'a, T> {
     fn drop(&mut self) {
+        // pre-drain the iter
         for _ in &mut self.iter {}
     }
 }
