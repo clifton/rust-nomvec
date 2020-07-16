@@ -3,18 +3,20 @@ name: Rust
 on: [push]
 
 jobs:
-  build:
-
+  test:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v1
-    - name: Install latest nightly
+    - uses: actions/checkout@v2
+    - name: Install minimal stable
       uses: actions-rs/toolchain@v1
       with:
-        toolchain: nightly
-        override: true
+        profile: minimal
+        toolchain: stable
+
     - name: Build
-      run: cargo +nightly build --verbose
-    - name: Run tests
-      run: cargo +nightly test --verbose
+      run: cargo +stable build --verbose
+    - name: Check
+      run: cargo +stable check --verbose
+    - name: Test
+      run: cargo +stable test --verbose
+
