@@ -1,7 +1,4 @@
-#![feature(ptr_internals)] // std::ptr::Unique
-#![feature(alloc_internals)] // std::alloc::*
-
-use std::alloc::{self, dealloc, realloc, rust_oom, Layout};
+use std::alloc::{self, Layout};
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
@@ -30,38 +27,33 @@ impl<T> RawVec<T> {
 
     // unchanged from Vec
     fn grow(&mut self) {
-        let elem_size = mem::size_of::<T>();
-        let align = mem::align_of::<T>();
         // since we set the capacity to usize::MAX when elem_size is
         // 0, getting to here necessarily means the Vec is overfull.
-        assert!(elem_size != 0, "capacity overflow");
-        let (new_cap, ptr) = if self.cap == 0 {
-            let new_layout = Layout::from_size_align(elem_size, align).unwrap();
-            let ptr = unsafe { alloc::alloc(new_layout) };
-            (1, ptr)
+        assert!(mem::size_of::<T>() != 0, "capacity overflow");
+
+        let (new_cap, new_layout) = if self.cap == 0 {
+            (1, Layout::array::<T>(1).unwrap())
         } else {
+            // this cant overflow because we ensure self.cap <= isize::MAX
             let new_cap = self.cap * 2;
-            let old_num_bytes = self.cap * elem_size;
-            assert!(
-                old_num_bytes <= (::std::isize::MAX as usize) / 2,
-                "Capacity overflow!"
-            );
-            let num_new_bytes = old_num_bytes * 2;
-            let old_layout =
-                Layout::from_size_align(old_num_bytes, align).unwrap();
-            let ptr = unsafe {
-                realloc(self.ptr.as_ptr() as *mut _, old_layout, num_new_bytes)
-            };
-            (new_cap, ptr)
+            (new_cap, Layout::array::<T>(new_cap).unwrap())
         };
 
-        // If allocate or reallocate fail, we'll get `null` back
-        let new_layout =
-            Layout::from_size_align(new_cap * elem_size, align).unwrap();
-        if ptr.is_null() {
-            rust_oom(new_layout);
-        }
-        self.ptr = match NonNull::new(ptr as *mut _) {
+        assert!(
+            new_layout.size() <= ::std::isize::MAX as usize,
+            "Allocation too large"
+        );
+
+        let new_ptr = if self.cap == 0 {
+            unsafe { alloc::alloc(new_layout) }
+        } else {
+            let old_layout = Layout::array::<T>(self.cap).unwrap();
+            let old_ptr = self.ptr.as_ptr() as *mut u8;
+            unsafe { alloc::realloc(old_ptr, old_layout, new_layout.size()) }
+        };
+
+        // if allocation fails, `new_ptr` will be null in which case we will abort
+        self.ptr = match NonNull::new(new_ptr as *mut _) {
             Some(p) => p,
             None => alloc::handle_alloc_error(new_layout),
         };
@@ -80,7 +72,7 @@ impl<T> Drop for RawVec<T> {
                 let num_bytes = elem_size * self.cap;
                 let layout = Layout::from_size_align(num_bytes, align).unwrap();
                 unsafe {
-                    dealloc(self.ptr.as_ptr() as *mut _, layout);
+                    alloc::dealloc(self.ptr.as_ptr() as *mut _, layout);
                 }
             }
         }
