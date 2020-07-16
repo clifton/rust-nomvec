@@ -1,12 +1,12 @@
 # rust-nomvec
 
-vector implementation from [The Rustonomicon](https://doc.rust-lang.org/nomicon/) thats compatible with rust nightly 1.42
+vector implementation from [The Rustonomicon](https://doc.rust-lang.org/nomicon/) thats compatible with rust stable 1.45
 
-## Building / Testing
+## Testing
 
-This repo uses a few `#![feature(_)]`s and those require you use the nightly rust channel.
-You can enable this via `$ rustup override set nightly` in your project dir or via
-[other precedence overrides](https://github.com/rust-lang/rustup#override-precedence).*
+```sh
+$ cargo test
+```
 
 ## Using
 
