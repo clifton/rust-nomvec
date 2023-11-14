@@ -84,6 +84,12 @@ pub struct NomVec<T> {
     len: usize,
 }
 
+impl<T> Default for NomVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> NomVec<T> {
     fn ptr(&self) -> *mut T {
         self.buf.ptr.as_ptr()
@@ -105,7 +111,7 @@ impl<T> NomVec<T> {
             self.buf.grow();
         }
         unsafe {
-            ptr::write(self.ptr().offset(self.len as isize), elem);
+            ptr::write(self.ptr().add(self.len), elem);
         }
         // Can't fail, we'll OOM first.
         self.len += 1;
@@ -116,8 +122,12 @@ impl<T> NomVec<T> {
             None
         } else {
             self.len -= 1;
-            unsafe { Some(ptr::read(self.ptr().offset(self.len as isize))) }
+            unsafe { Some(ptr::read(self.ptr().add(self.len))) }
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn len(&self) -> usize {
@@ -134,12 +144,12 @@ impl<T> NomVec<T> {
         unsafe {
             if index < self.len {
                 ptr::copy(
-                    self.ptr().offset(index as isize),
-                    self.ptr().offset(index as isize + 1),
+                    self.ptr().add(index),
+                    self.ptr().add(index + 1),
                     self.len - index,
                 );
             }
-            ptr::write(self.ptr().offset(index as isize), elem);
+            ptr::write(self.ptr().add(index), elem);
             self.len += 1;
         }
     }
@@ -148,10 +158,10 @@ impl<T> NomVec<T> {
         assert!(index < self.len, "index out of bounds");
         unsafe {
             self.len -= 1;
-            let result = ptr::read(self.ptr().offset(index as isize));
+            let result = ptr::read(self.ptr().add(index));
             ptr::copy(
-                self.ptr().offset(index as isize + 1),
-                self.ptr().offset(index as isize),
+                self.ptr().add(index + 1),
+                self.ptr().add(index),
                 self.len - index,
             );
             result
@@ -160,7 +170,7 @@ impl<T> NomVec<T> {
 
     pub fn drain(&mut self) -> Drain<T> {
         unsafe {
-            let iter = RawValIter::new(&self);
+            let iter = RawValIter::new(self);
             // this is a mem::forget safety thing. If Drain is forgotten, we just
             // leak the whole Vec's contents. Also we need to do this *eventually*
             // anyway, so why not do it now?
@@ -176,7 +186,7 @@ impl<T> NomVec<T> {
 impl<T> Drop for NomVec<T> {
     fn drop(&mut self) {
         // deallocation is handled by RawVec
-        while let Some(_) = self.pop() {}
+        while self.pop().is_some() {}
     }
 }
 
@@ -224,13 +234,13 @@ impl<T> RawValIter<T> {
             start: slice.as_ptr(),
             end: if mem::size_of::<T>() == 0 {
                 ((slice.as_ptr() as usize) + slice.len()) as *const _
-            } else if slice.len() == 0 {
+            } else if slice.is_empty() {
                 // if `len = 0`, then this is not actually allocated memory.
                 // Need to avoid offsetting because that will give wrong
                 // information to LLVM via GEP.
                 slice.as_ptr()
             } else {
-                slice.as_ptr().offset(slice.len() as isize)
+                slice.as_ptr().add(slice.len())
             },
         }
     }
@@ -383,7 +393,7 @@ mod tests {
         assert_eq!(cv.len(), 1);
         cv.pop();
         assert_eq!(cv.len(), 0);
-        assert!(cv.pop() == None);
+        assert!(cv.pop().is_none());
     }
 
     #[test]
