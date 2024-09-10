@@ -1,17 +1,40 @@
-use std::alloc::{self, Layout};
+#![feature(allocator_api)]
+use std::alloc::{Allocator, Global, Layout};
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::ptr::{self, NonNull};
 
-struct RawVec<T> {
+#[derive(Debug)]
+pub enum AllocationError {
+    CapacityOverflow,
+    AllocationTooLarge,
+    AllocationFailed,
+}
+
+impl std::fmt::Display for AllocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AllocationError::CapacityOverflow => write!(f, "Capacity overflow"),
+            AllocationError::AllocationTooLarge => {
+                write!(f, "Allocation too large")
+            }
+            AllocationError::AllocationFailed => write!(f, "Allocation failed"),
+        }
+    }
+}
+
+impl std::error::Error for AllocationError {}
+
+struct RawVec<T, A: Allocator> {
     ptr: NonNull<T>,
     cap: usize,
+    alloc: A,
     _marker: PhantomData<T>,
 }
 
-impl<T> RawVec<T> {
-    fn new() -> Self {
+impl<T, A: Allocator> RawVec<T, A> {
+    fn new(alloc: A) -> Self {
         let cap = if mem::size_of::<T>() == 0 {
             usize::MAX
         } else {
@@ -21,14 +44,17 @@ impl<T> RawVec<T> {
         RawVec {
             ptr: NonNull::dangling(),
             cap,
+            alloc,
             _marker: PhantomData,
         }
     }
 
-    fn grow(&mut self) {
+    fn grow(&mut self) -> Result<(), AllocationError> {
         // since we set the capacity to usize::MAX when elem_size is
         // 0, getting to here necessarily means the Vec is overfull.
-        assert!(mem::size_of::<T>() != 0, "capacity overflow");
+        if mem::size_of::<T>() == 0 {
+            return Err(AllocationError::CapacityOverflow);
+        }
 
         let new_cap = if self.cap == 0 {
             4 // Start with a small capacity
@@ -41,29 +67,30 @@ impl<T> RawVec<T> {
         let new_cap = new_cap.min(isize::MAX as usize);
         let new_layout = Layout::array::<T>(new_cap).unwrap();
 
-        assert!(
-            new_layout.size() <= isize::MAX as usize,
-            "Allocation too large"
-        );
+        if new_layout.size() > isize::MAX as usize {
+            return Err(AllocationError::AllocationTooLarge);
+        }
 
         let new_ptr = if self.cap == 0 {
-            unsafe { alloc::alloc(new_layout) }
+            self.alloc.allocate(new_layout)
         } else {
             let old_layout = Layout::array::<T>(self.cap).unwrap();
-            let old_ptr = self.ptr.as_ptr() as *mut u8;
-            unsafe { alloc::realloc(old_ptr, old_layout, new_layout.size()) }
+            unsafe {
+                self.alloc
+                    .grow(self.ptr.cast::<u8>(), old_layout, new_layout)
+            }
         };
-
-        // if allocation fails, `new_ptr` will be null in which case we will abort
-        self.ptr = match NonNull::new(new_ptr as *mut _) {
-            Some(p) => p,
-            None => alloc::handle_alloc_error(new_layout),
+        // if allocation fails, `new_ptr` will be null in which case we will return an error
+        self.ptr = match new_ptr {
+            Ok(ptr) => ptr.cast(),
+            Err(_) => return Err(AllocationError::AllocationFailed),
         };
         self.cap = new_cap;
+        Ok(())
     }
 }
 
-impl<T> Drop for RawVec<T> {
+impl<T, A: Allocator> Drop for RawVec<T, A> {
     fn drop(&mut self) {
         if self.cap != 0 {
             let elem_size = mem::size_of::<T>();
@@ -74,25 +101,25 @@ impl<T> Drop for RawVec<T> {
                 let num_bytes = elem_size * self.cap;
                 let layout = Layout::from_size_align(num_bytes, align).unwrap();
                 unsafe {
-                    alloc::dealloc(self.ptr.as_ptr() as *mut _, layout);
+                    self.alloc.deallocate(self.ptr.cast::<u8>(), layout);
                 }
             }
         }
     }
 }
 
-pub struct NomVec<T> {
-    buf: RawVec<T>,
+pub struct NomVec<T, A: Allocator = Global> {
+    buf: RawVec<T, A>,
     len: usize,
 }
 
-impl<T> Default for NomVec<T> {
+impl<T, A: Allocator + Default> Default for NomVec<T, A> {
     fn default() -> Self {
-        Self::new()
+        Self::new(A::default())
     }
 }
 
-impl<T> NomVec<T> {
+impl<T, A: Allocator> NomVec<T, A> {
     fn ptr(&self) -> *mut T {
         self.buf.ptr.as_ptr()
     }
@@ -101,16 +128,16 @@ impl<T> NomVec<T> {
         self.buf.cap
     }
 
-    pub fn new() -> Self {
+    pub fn new(alloc: A) -> Self {
         Self {
-            buf: RawVec::new(),
+            buf: RawVec::new(alloc),
             len: 0,
         }
     }
 
     pub fn push(&mut self, elem: T) {
         if self.len == self.cap() {
-            self.buf.grow();
+            self.buf.grow().unwrap();
         }
         unsafe {
             ptr::write(self.ptr().add(self.len), elem);
@@ -141,7 +168,7 @@ impl<T> NomVec<T> {
         // which would be equivalent to push.
         assert!(index <= self.len, "index out of bounds");
         if self.cap() == self.len {
-            self.buf.grow();
+            self.buf.grow().unwrap();
         }
         unsafe {
             if index < self.len {
@@ -170,7 +197,7 @@ impl<T> NomVec<T> {
         }
     }
 
-    pub fn drain(&mut self) -> Drain<T> {
+    pub fn drain(&mut self) -> Drain<T, A> {
         unsafe {
             let iter = RawValIter::new(self);
             // this is a mem::forget safety thing. If Drain is forgotten, we just
@@ -185,31 +212,31 @@ impl<T> NomVec<T> {
     }
 }
 
-impl<T> Drop for NomVec<T> {
+impl<T, A: Allocator> Drop for NomVec<T, A> {
     fn drop(&mut self) {
         // deallocation is handled by RawVec
         while self.pop().is_some() {}
     }
 }
 
-impl<T> Deref for NomVec<T> {
+impl<T, A: Allocator> Deref for NomVec<T, A> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         unsafe { ::std::slice::from_raw_parts(self.ptr(), self.len) }
     }
 }
 
-impl<T> DerefMut for NomVec<T> {
+impl<T, A: Allocator> DerefMut for NomVec<T, A> {
     fn deref_mut(&mut self) -> &mut [T] {
         unsafe { ::std::slice::from_raw_parts_mut(self.ptr(), self.len) }
     }
 }
 
-impl<T> IntoIterator for NomVec<T> {
+impl<T, A: Allocator> IntoIterator for NomVec<T, A> {
     type Item = T;
-    type IntoIter = IntoIter<T>;
+    type IntoIter = IntoIter<T, A>;
 
-    fn into_iter(self) -> IntoIter<T> {
+    fn into_iter(self) -> IntoIter<T, A> {
         unsafe {
             // need to use ptr::read to unsafely move the buf out since it's
             // not Copy, and Vec implements Drop (so we can't destructure it).
@@ -287,12 +314,12 @@ impl<T> DoubleEndedIterator for RawValIter<T> {
     }
 }
 
-pub struct IntoIter<T> {
-    _buf: RawVec<T>,
+pub struct IntoIter<T, A: Allocator> {
+    _buf: RawVec<T, A>,
     iter: RawValIter<T>,
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T, A: Allocator> Iterator for IntoIter<T, A> {
     type Item = T;
     fn next(&mut self) -> Option<T> {
         self.iter.next()
@@ -303,13 +330,13 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T> DoubleEndedIterator for IntoIter<T> {
+impl<T, A: Allocator> DoubleEndedIterator for IntoIter<T, A> {
     fn next_back(&mut self) -> Option<T> {
         self.iter.next_back()
     }
 }
 
-impl<T> Drop for IntoIter<T> {
+impl<T, A: Allocator> Drop for IntoIter<T, A> {
     fn drop(&mut self) {
         // only need to ensure all our elements are read;
         // buffer will clean itself up afterwards.
@@ -317,15 +344,15 @@ impl<T> Drop for IntoIter<T> {
     }
 }
 
-pub struct Drain<'a, T: 'a> {
+pub struct Drain<'a, T: 'a, A: Allocator + 'a> {
     // Need to bound the lifetime here, so we do it with `&'a mut Vec<T>`
     // because that's semantically what we contain. We're "just" calling
     // `pop()` and `remove(0)`.
-    vec: PhantomData<&'a mut NomVec<T>>,
+    vec: PhantomData<&'a mut NomVec<T, A>>,
     iter: RawValIter<T>,
 }
 
-impl<'a, T> Iterator for Drain<'a, T> {
+impl<'a, T, A: Allocator> Iterator for Drain<'a, T, A> {
     type Item = T;
     fn next(&mut self) -> Option<T> {
         self.iter.next()
@@ -335,13 +362,13 @@ impl<'a, T> Iterator for Drain<'a, T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
+impl<'a, T, A: Allocator> DoubleEndedIterator for Drain<'a, T, A> {
     fn next_back(&mut self) -> Option<T> {
         self.iter.next_back()
     }
 }
 
-impl<'a, T> Drop for Drain<'a, T> {
+impl<'a, T, A: Allocator> Drop for Drain<'a, T, A> {
     fn drop(&mut self) {
         // pre-drain the iter
         for _ in &mut self.iter {}
@@ -354,7 +381,7 @@ mod tests {
 
     #[test]
     fn vec_push() {
-        let mut cv = NomVec::new();
+        let mut cv = NomVec::new(Global);
         cv.push(2);
         assert_eq!(cv.len(), 1);
         cv.push(3);
@@ -363,7 +390,7 @@ mod tests {
 
     #[test]
     fn vec_iter() {
-        let mut cv = NomVec::new();
+        let mut cv = NomVec::new(Global);
         cv.push(2);
         cv.push(3);
         let mut accum = 0;
@@ -375,7 +402,7 @@ mod tests {
 
     #[test]
     fn vec_into_iter() {
-        let mut cv = NomVec::new();
+        let mut cv = NomVec::new(Global);
         cv.push(2);
         cv.push(3);
         assert_eq!(cv.into_iter().collect::<Vec<i32>>(), vec![2, 3]);
@@ -383,7 +410,7 @@ mod tests {
 
     #[test]
     fn vec_into_double_ended_iter() {
-        let mut cv = NomVec::new();
+        let mut cv = NomVec::new(Global);
         cv.push(2);
         cv.push(3);
         assert_eq!(*cv.iter().next_back().unwrap(), 3);
@@ -391,7 +418,7 @@ mod tests {
 
     #[test]
     fn vec_pop() {
-        let mut cv = NomVec::new();
+        let mut cv = NomVec::new(Global);
         cv.push(2);
         assert_eq!(cv.len(), 1);
         cv.pop();
@@ -401,7 +428,7 @@ mod tests {
 
     #[test]
     fn vec_insert() {
-        let mut cv: NomVec<i32> = NomVec::new();
+        let mut cv: NomVec<i32, Global> = NomVec::new(Global);
         cv.insert(0, 2); // test insert at end
         cv.insert(0, 1); // test insert at beginning
         assert_eq!(cv.pop().unwrap(), 2);
@@ -409,7 +436,7 @@ mod tests {
 
     #[test]
     fn vec_remove() {
-        let mut cv = NomVec::new();
+        let mut cv = NomVec::new(Global);
         cv.push(2);
         assert_eq!(cv.remove(0), 2);
         assert_eq!(cv.len(), 0);
@@ -418,13 +445,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "index out of bounds")]
     fn vec_cant_remove() {
-        let mut cv: NomVec<i32> = NomVec::new();
+        let mut cv: NomVec<i32, Global> = NomVec::new(Global);
         cv.remove(0);
     }
 
     #[test]
     fn vec_drain() {
-        let mut cv = NomVec::new();
+        let mut cv = NomVec::new(Global);
         cv.push(1);
         cv.push(2);
         cv.push(3);
@@ -439,7 +466,7 @@ mod tests {
 
     #[test]
     fn vec_zst() {
-        let mut v = NomVec::new();
+        let mut v = NomVec::new(Global);
         for _i in 0..10 {
             v.push(());
         }
