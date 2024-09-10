@@ -25,19 +25,21 @@ impl<T> RawVec<T> {
         }
     }
 
-    // unchanged from Vec
     fn grow(&mut self) {
         // since we set the capacity to usize::MAX when elem_size is
         // 0, getting to here necessarily means the Vec is overfull.
         assert!(mem::size_of::<T>() != 0, "capacity overflow");
 
-        let (new_cap, new_layout) = if self.cap == 0 {
-            (1, Layout::array::<T>(1).unwrap())
+        let new_cap = if self.cap == 0 {
+            4 // Start with a small capacity
         } else {
-            // this cant overflow because we ensure self.cap <= isize::MAX
-            let new_cap = self.cap * 2;
-            (new_cap, Layout::array::<T>(new_cap).unwrap())
+            // Grow by ~1.5x, which is a good balance between memory usage and performance
+            self.cap + (self.cap >> 1)
         };
+
+        // Check for potential overflow
+        let new_cap = new_cap.min(isize::MAX as usize);
+        let new_layout = Layout::array::<T>(new_cap).unwrap();
 
         assert!(
             new_layout.size() <= isize::MAX as usize,
