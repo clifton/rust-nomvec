@@ -478,4 +478,15 @@ mod tests {
         }
         assert_eq!(10, count);
     }
+
+    #[test]
+    fn test_many_allocations() {
+        let mut cv = NomVec::new(Global);
+        for i in 0..10_000_000 {
+            cv.push(i);
+        }
+        assert_eq!(cv.len(), 10_000_000);
+        assert_eq!(cv[999_999], 999_999);
+        assert!(cv.cap() > 10_000_000);
+    }
 }
