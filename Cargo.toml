@@ -3,7 +3,7 @@ name = "nomvec"
 version = "0.1.1"
 authors = ["Clifton King <cliftonk@gmail.com>"]
 edition = "2018"
-description = "Vector implementation from"
+description = "Vector implementation from rustnomicon"
 license = "MIT"
 
 [dependencies]

@@ -13,7 +13,7 @@ struct RawVec<T> {
 impl<T> RawVec<T> {
     fn new() -> Self {
         let cap = if mem::size_of::<T>() == 0 {
-            ::std::usize::MAX
+            usize::MAX
         } else {
             0
         };
@@ -40,7 +40,7 @@ impl<T> RawVec<T> {
         };
 
         assert!(
-            new_layout.size() <= ::std::isize::MAX as usize,
+            new_layout.size() <= isize::MAX as usize,
             "Allocation too large"
         );
 
@@ -230,17 +230,18 @@ impl<T> RawValIter<T> {
     // its actual allocation. OK since it's a private implementation
     // detail.
     unsafe fn new(slice: &[T]) -> Self {
+        let start = slice.as_ptr();
         RawValIter {
-            start: slice.as_ptr(),
+            start,
             end: if mem::size_of::<T>() == 0 {
-                ((slice.as_ptr() as usize) + slice.len()) as *const _
+                ((start as usize) + slice.len()) as *const _
             } else if slice.is_empty() {
                 // if `len = 0`, then this is not actually allocated memory.
                 // Need to avoid offsetting because that will give wrong
                 // information to LLVM via GEP.
-                slice.as_ptr()
+                start
             } else {
-                slice.as_ptr().add(slice.len())
+                start.add(slice.len())
             },
         }
     }
