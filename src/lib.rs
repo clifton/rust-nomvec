@@ -197,7 +197,7 @@ impl<T, A: Allocator> NomVec<T, A> {
         }
     }
 
-    pub fn drain(&mut self) -> Drain<T, A> {
+    pub fn drain(&mut self) -> Drain<'_, T, A> {
         unsafe {
             let iter = RawValIter::new(self);
             // this is a mem::forget safety thing. If Drain is forgotten, we just
