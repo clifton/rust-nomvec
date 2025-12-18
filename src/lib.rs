@@ -65,7 +65,8 @@ impl<T, A: Allocator> RawVec<T, A> {
 
         // Check for potential overflow
         let new_cap = new_cap.min(isize::MAX as usize);
-        let new_layout = Layout::array::<T>(new_cap).unwrap();
+        let new_layout = Layout::array::<T>(new_cap)
+            .map_err(|_| AllocationError::CapacityOverflow)?;
 
         if new_layout.size() > isize::MAX as usize {
             return Err(AllocationError::AllocationTooLarge);
@@ -74,7 +75,8 @@ impl<T, A: Allocator> RawVec<T, A> {
         let new_ptr = if self.cap == 0 {
             self.alloc.allocate(new_layout)
         } else {
-            let old_layout = Layout::array::<T>(self.cap).unwrap();
+            let old_layout = Layout::array::<T>(self.cap)
+                .map_err(|_| AllocationError::CapacityOverflow)?;
             unsafe {
                 self.alloc
                     .grow(self.ptr.cast::<u8>(), old_layout, new_layout)
@@ -92,18 +94,15 @@ impl<T, A: Allocator> RawVec<T, A> {
 
 impl<T, A: Allocator> Drop for RawVec<T, A> {
     fn drop(&mut self) {
-        if self.cap != 0 {
-            let elem_size = mem::size_of::<T>();
+        // Don't free zero-sized allocations, as they were never allocated.
+        if self.cap == 0 || mem::size_of::<T>() == 0 {
+            return;
+        }
 
-            // don't free zero-sized allocations, as they were never allocated.
-            if self.cap != 0 && elem_size != 0 {
-                let align = mem::align_of::<T>();
-                let num_bytes = elem_size * self.cap;
-                let layout = Layout::from_size_align(num_bytes, align).unwrap();
-                unsafe {
-                    self.alloc.deallocate(self.ptr.cast::<u8>(), layout);
-                }
-            }
+        // `cap != 0` and `T` non-ZST implies this layout exists.
+        let layout = Layout::array::<T>(self.cap).unwrap();
+        unsafe {
+            self.alloc.deallocate(self.ptr.cast::<u8>(), layout);
         }
     }
 }
@@ -251,6 +250,10 @@ impl<T, A: Allocator> IntoIterator for NomVec<T, A> {
 struct RawValIter<T> {
     start: *const T,
     end: *const T,
+    // For ZSTs, pointer math doesn't advance and `size_of::<T>() == 0` would
+    // make `size_hint()` divide by zero. Track an explicit front/back index.
+    zst_front: usize,
+    zst_back: usize,
 }
 
 impl<T> RawValIter<T> {
@@ -262,15 +265,18 @@ impl<T> RawValIter<T> {
         let start = slice.as_ptr();
         RawValIter {
             start,
-            end: if mem::size_of::<T>() == 0 {
-                ((start as usize) + slice.len()) as *const _
-            } else if slice.is_empty() {
-                // if `len = 0`, then this is not actually allocated memory.
-                // Need to avoid offsetting because that will give wrong
-                // information to LLVM via GEP.
+            end: if mem::size_of::<T>() == 0 || slice.is_empty() {
+                // For ZST we don't use `end` for pointer comparisons.
+                // For `len = 0`, this is also not actually allocated memory.
                 start
             } else {
                 start.add(slice.len())
+            },
+            zst_front: 0,
+            zst_back: if mem::size_of::<T>() == 0 {
+                slice.len()
+            } else {
+                0
             },
         }
     }
@@ -279,35 +285,55 @@ impl<T> RawValIter<T> {
 impl<T> Iterator for RawValIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<T> {
-        if self.start == self.end {
+        if mem::size_of::<T>() == 0 {
+            if self.zst_front == self.zst_back {
+                None
+            } else {
+                unsafe {
+                    let p = (self.start as usize + self.zst_front) as *const T;
+                    self.zst_front += 1;
+                    Some(ptr::read(p))
+                }
+            }
+        } else if self.start == self.end {
             None
         } else {
             unsafe {
                 let result = ptr::read(self.start);
-                self.start = if mem::size_of::<T>() == 0 {
-                    (self.start as usize + 1) as *const _
-                } else {
-                    self.start.offset(1)
-                };
+                self.start = self.start.add(1);
                 Some(result)
             }
         }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len =
-            (self.end as usize - self.start as usize) / mem::size_of::<T>();
+        let len = if mem::size_of::<T>() == 0 {
+            self.zst_back - self.zst_front
+        } else {
+            // SAFETY: `start` and `end` are derived from the same slice.
+            unsafe { self.end.offset_from(self.start) as usize }
+        };
         (len, Some(len))
     }
 }
 
 impl<T> DoubleEndedIterator for RawValIter<T> {
     fn next_back(&mut self) -> Option<T> {
-        if self.start == self.end {
+        if mem::size_of::<T>() == 0 {
+            if self.zst_front == self.zst_back {
+                None
+            } else {
+                unsafe {
+                    self.zst_back -= 1;
+                    let p = (self.start as usize + self.zst_back) as *const T;
+                    Some(ptr::read(p))
+                }
+            }
+        } else if self.start == self.end {
             None
         } else {
             unsafe {
-                self.end = self.end.offset(-1);
+                self.end = self.end.sub(1);
                 Some(ptr::read(self.end))
             }
         }
@@ -477,6 +503,25 @@ mod tests {
             count += 1
         }
         assert_eq!(10, count);
+    }
+
+    #[test]
+    fn zst_double_ended_iter_and_size_hint() {
+        let mut v = NomVec::new(Global);
+        for _ in 0..10 {
+            v.push(());
+        }
+
+        let mut it = v.into_iter();
+        assert_eq!(it.size_hint(), (10, Some(10)));
+
+        assert_eq!(it.next().unwrap(), ());
+        assert_eq!(it.size_hint(), (9, Some(9)));
+
+        assert_eq!(it.next_back().unwrap(), ());
+        assert_eq!(it.size_hint(), (8, Some(8)));
+
+        assert_eq!(it.count(), 8);
     }
 
     #[test]
